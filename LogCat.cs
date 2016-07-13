@@ -10,10 +10,9 @@ public class LogCat : EditorWindow {
 	#region fields
 
 	//
-	readonly string _pathToAdb = @"D:\ProgramData\Android\SDK\platform-tools\adb.exe";
-	const string _projectSubFolder = "/logcat";
-	const string _logRaw = "/raw.txt";
-	const string _logFormatted = "/formatted.txt";
+	string pathToAdb;
+	const string _logRaw = "/logcat_raw.txt";
+	const string _logFormatted = "/logcat_formatted.txt";
 	//
 	string path_logRaw;
 	string path_logFormatted;
@@ -23,16 +22,21 @@ public class LogCat : EditorWindow {
 	Vector2 scrollViewPosition;
 	//
 	bool skipThisGuiFrame = false;
+	bool connectedToDevice = false;
 	//
 	GUIStyle guistyle_normal;
 	GUIStyle guistyle_important;
 	GUIStyle guistyle_minor;
+	//
+	IEnumerator testConnectedToDevice;
+	//
 
 	#endregion
 	#region editor window methods
 
 	void Update () {
 		skipThisGuiFrame = false;
+		testConnectedToDevice.MoveNext();
 	}
 
 	void OnGUI () {
@@ -42,52 +46,28 @@ public class LogCat : EditorWindow {
 		}
 		//
 		if( path_logRaw==null ) {
-			path_logRaw = string.Format( "{0}{1}{2}" , Application.temporaryCachePath , _projectSubFolder , _logRaw );
+			path_logRaw = string.Format( "{0}{1}" , Application.temporaryCachePath , _logRaw );
 		}
 		if( path_logFormatted==null ) {
-			path_logFormatted = string.Format( "{0}{1}{2}" , Application.temporaryCachePath , _projectSubFolder , _logFormatted );
+			path_logFormatted = string.Format( "{0}{1}" , Application.temporaryCachePath , _logFormatted );
 		}
 
 		EditorGUILayout.BeginHorizontal();
 		{
 			if( GUILayout.Button( "|" , GUILayout.Width( 10f ) ) ) {
-				Debug.Log( Application.temporaryCachePath+_projectSubFolder );
+				Debug.Log( Application.temporaryCachePath );
 			}
 			//
-			if( GUILayout.Button( "Restart Logcat process" ) ) {
-				if( System.IO.File.Exists( path_logRaw )==true ) {
-					System.IO.File.Delete( path_logRaw );
-				}
-				if( System.IO.File.Exists( path_logFormatted )==true ) {
-					System.IO.File.Delete( path_logFormatted );
-				}
+			if( GUILayout.Button( "Reset" ) ) {
 				StartAdbLogcatHandling();
-			}
-
-			GUILayout.Label( adbProcessList.ContainsKey( "logcat" )==true ? (adbProcessList["logcat"].HasExited ? "0" : "1") : "-" );
-
-			//
-			if( GUILayout.Button( "log devices" ) ) {
-				string devicesResult = "";
-				StartAdbProcess(
-					"devices" ,
-					"devices" ,
-					(sender , output ) => devicesResult += output.Data ,
-					true ,
-					1000*5
-				);
-				Debug.Log( devicesResult );
 			}
 
 			EditorGUILayout.Space();
 
-			if( GUILayout.Button( "connect to ip:" ) ) {
+			if( GUILayout.Button( connectedToDevice==true ? "connected to ip:" : "connect to ip:" ) ) {
 				//
-				System.Net.IPAddress ip;
-				System.Net.IPAddress.TryParse( EditorPrefs.GetString( "logcat_device_ip" ) , out ip );
+				System.Net.IPAddress ip = GetMyDeviceIp();
 				if( ip!=null ) {
-					//
-					Debug.Log( "ip = "+ip.ToString() );
 					//
 					StartAdbProcess(
 						"set tcpip port to 5555" ,
@@ -114,9 +94,8 @@ public class LogCat : EditorWindow {
 					Debug.LogWarning( "enter valid ip address" );
 				}
 			}
-			System.Net.IPAddress deviceIp;
-			System.Net.IPAddress.TryParse( EditorPrefs.GetString( "logcat_device_ip" ) , out deviceIp );
-			EditorPrefs.SetString( "logcat_device_ip" , EditorGUILayout.TextField( deviceIp!=null ? deviceIp.ToString() : "enter ip address" , GUILayout.MaxWidth( 100f ) ) );
+			System.Net.IPAddress getDeviceIp = GetMyDeviceIp();
+			EditorPrefs.SetString( "logcat_device_ip" , EditorGUILayout.TextField( getDeviceIp!=null ? getDeviceIp.ToString() : "enter ip address" , GUILayout.MaxWidth( 100f ) ) );
 		}
 		EditorGUILayout.EndHorizontal();
 
@@ -138,7 +117,7 @@ public class LogCat : EditorWindow {
 							guistyle = guistyle_minor;
 						}
 						else*/
-						if( lineUpperCases.Contains( "MISSING" ) || lineUpperCases.Contains( "NULL" ) || lineUpperCases.Contains( "EXCEPTION" ) || lineUpperCases.Contains( "ERROR" ) || lineUpperCases.Contains( "UNABLE TO" ) ) {
+						if( lineUpperCases.Contains( "MISSING" ) || lineUpperCases.Contains( "NULL" ) || lineUpperCases.Contains( "EXCEPTION" ) || lineUpperCases.Contains( "ERROR" ) || lineUpperCases.Contains( "UNABLE TO" ) || lineUpperCases.Contains( "CAN'T" ) || lineUpperCases.Contains( "CANNOT" ) ) {
 							guistyle = guistyle_important;
 						}
 						//
@@ -151,6 +130,9 @@ public class LogCat : EditorWindow {
 			GUILayout.FlexibleSpace();
 		}
 		EditorGUILayout.EndScrollView();
+		foreach( string s in adbProcessList.Keys ) {
+			EditorGUILayout.LabelField( s );
+		}
 	}
 
 	/// <summary> window initialization </summary>
@@ -159,7 +141,7 @@ public class LogCat : EditorWindow {
 		this.minSize = new Vector2( 100f , 100f );
 		this.titleContent = new GUIContent( "LogCat" );
 		//
-		this.MakeSureTempFolderExists();
+		this.InitializeDirectoryPaths();
 		this.StartAdbLogcatHandling();
 		//
 		InitializeGuiStyles();
@@ -199,12 +181,15 @@ public class LogCat : EditorWindow {
 		if( argWaitForExit==false ) {
 			//
 			if( adbProcessList.ContainsKey( giveProcessUniqueLabel )==true ) {
-				if( adbProcessList[giveProcessUniqueLabel].HasExited ) {
-					Debug.LogError( "proces się zakończył a nadal jest na liście" );
+				//
+				if( adbProcessList[giveProcessUniqueLabel].HasExited==false ) {
+					adbProcessList[giveProcessUniqueLabel].CloseMainWindow();
+					adbProcessList[giveProcessUniqueLabel].Close();
+					adbProcessList.Remove( giveProcessUniqueLabel );
 				}
-				adbProcessList[giveProcessUniqueLabel].CloseMainWindow();
-				adbProcessList[giveProcessUniqueLabel].Close();
-				adbProcessList.Remove( giveProcessUniqueLabel );
+				else {
+					Debug.LogError( "proces \'"+giveProcessUniqueLabel+"\' się zakończył a nadal jest na liście" );
+				}
 			}
 			//add process to list and setup its exit action:
 			adbProcessList.Add( giveProcessUniqueLabel , p );
@@ -220,7 +205,7 @@ public class LogCat : EditorWindow {
 			};
 		}
 		//
-		p.StartInfo.FileName = _pathToAdb;
+		p.StartInfo.FileName = pathToAdb;
 		p.StartInfo.Arguments = argumentsForAdbExe;//example: "logcat -s Unity"
 		p.StartInfo.UseShellExecute = false;
 		p.StartInfo.RedirectStandardOutput = true;
@@ -240,12 +225,19 @@ public class LogCat : EditorWindow {
 	}
 
 	void StartAdbLogcatHandling () {
+		if( System.IO.File.Exists( path_logRaw )==true ) {
+			System.IO.File.Delete( path_logRaw );
+		}
+		if( System.IO.File.Exists( path_logFormatted )==true ) {
+			System.IO.File.Delete( path_logFormatted );
+		}
 		StartAdbProcess(
 			"logcat" ,
 			"logcat -s Unity" ,
 			new DataReceivedEventHandler( OutputHandler ) ,
 			false
 		);
+		testConnectedToDevice = Enumerator_CheckIsMyDeviceConnected();
 	}
 
 	void OutputHandler ( object sendingProcess , DataReceivedEventArgs output ) {
@@ -302,12 +294,22 @@ public class LogCat : EditorWindow {
 		}
 	}
 
-	void MakeSureTempFolderExists () {
-		string path = Application.temporaryCachePath+_projectSubFolder;
+	System.Net.IPAddress GetMyDeviceIp () {
+		System.Net.IPAddress ip;
+		System.Net.IPAddress.TryParse( EditorPrefs.GetString( "logcat_device_ip" ) , out ip );
+		return ip;
+	}
+
+	void InitializeDirectoryPaths () {
+		//path to adb:
+		pathToAdb = UnityEditor.EditorPrefs.GetString( "AndroidSdkRoot" )+@"\platform-tools\adb.exe";
+		//make sure temp directory exists:
+		string path = Application.temporaryCachePath;
 		if( System.IO.Directory.Exists( path )==false ) {
 			System.IO.Directory.CreateDirectory( path );
 			Debug.Log( "logcat temp folder created: "+path );
 		}
+		//
 	}
 
 	void InitializeGuiStyles () {
@@ -325,6 +327,34 @@ public class LogCat : EditorWindow {
 			guistyle_important = new GUIStyle();
 			guistyle_important.normal.textColor = new Color( 0.7f , 0f , 0f );
 			guistyle_important.active.textColor = Color.white;
+		}
+	}
+
+	IEnumerator Enumerator_CheckIsMyDeviceConnected () {
+		while( true ) {
+			if( adbProcessList.ContainsKey( "devices" )==false ) {
+				//
+				System.Net.IPAddress ip = GetMyDeviceIp();
+				//ask adb:
+				StartAdbProcess(
+					"devices" ,
+					"devices" ,
+					(sender , output ) => {
+						//asses if connected:
+						if( ip!=null && output.Data.Contains( ip.ToString() )==true ) {
+							connectedToDevice = true;
+						}
+						else {
+							connectedToDevice = false;
+						}
+					} ,
+					false
+				);
+			}
+			//yield:
+			for( int i = 0 ; i<100 ; i++ ) {
+				yield return 0;
+			}
 		}
 	}
 
